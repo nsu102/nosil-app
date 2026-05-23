@@ -136,9 +136,9 @@ function BottomNav({ currentPage, bottomInset }: { currentPage: PageKey; bottomI
       <Pressable onPress={() => router.replace('/chat')} style={[styles.navButton, !isChat && styles.navButtonDim]}>
         <ChatIcon active={isChat} />
       </Pressable>
-      <View style={[styles.navButton, styles.navButtonDim]}>
+      <Pressable onPress={() => {}} style={[styles.navButton, styles.navButtonDim]}>
         <UserIcon />
-      </View>
+      </Pressable>
     </View>
   );
 }

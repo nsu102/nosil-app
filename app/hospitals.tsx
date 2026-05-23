@@ -8,12 +8,12 @@ import { useData } from '../contexts/DataContext';
 import StarRating from '../components/StarRating';
 import { useState, useCallback, useEffect } from 'react';
 import * as ImagePicker from 'expo-image-picker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import AppShell, { SubHeader } from '../components/AppShell';
-import { usePersistedState } from '../hooks/usePersistedState';
 import { F } from '../data/fonts';
+import { supabase } from '../lib/supabase';
+import { useUserId } from '../hooks/useUserId'; // TODO: 추후 로그인 로직으로 변경
 
-type ReviewWithPhotos = Review & { photoIds?: string[] };
+type ReviewWithPhotos = Review;
 type ReviewMap = Record<number, ReviewWithPhotos[]>;
 
 function getStats(reviews: ReviewWithPhotos[]) {
@@ -27,11 +27,15 @@ function fmtReviewDate(iso: string) {
   return d.getFullYear() + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + String(d.getDate()).padStart(2, '0');
 }
 
+function getReviewPhotoUrl(path: string) {
+  return supabase.storage.from('review-photos').getPublicUrl(path).data.publicUrl;
+}
+
 function HospitalDetail({ hospital, reviews, onBack, onAddReview, stats }: {
   hospital: Hospital;
   reviews: ReviewWithPhotos[];
   onBack: () => void;
-  onAddReview: (rating: number, text: string, photoIds: string[]) => void;
+  onAddReview: (rating: number, text: string, photoPaths: string[]) => Promise<void>;
   stats: { count: number; avg: number };
 }) {
   const [showWrite, setShowWrite] = useState(false);
@@ -44,6 +48,11 @@ function HospitalDetail({ hospital, reviews, onBack, onAddReview, stats }: {
 
   const pickPhoto = async () => {
     if (newPhotos.length >= 3) return;
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('권한 필요', '사진을 첨부하려면 앨범 접근 권한을 허용해주세요.');
+      return;
+    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       quality: 0.6,
@@ -59,20 +68,28 @@ function HospitalDetail({ hospital, reviews, onBack, onAddReview, stats }: {
     if (newRating === 0 || !newText.trim() || saving) return;
     setSaving(true);
     try {
-      const photoIds: string[] = [];
-      for (const data of newPhotos) {
-        const pid = 'p' + Date.now() + Math.random().toString(36).slice(2, 8);
-        try {
-          await AsyncStorage.setItem('review:photo:' + pid, data);
-          photoIds.push(pid);
-          setPhotoData((prev) => ({ ...prev, [pid]: data }));
-        } catch {}
+      const photoPaths: string[] = [];
+      for (let i = 0; i < newPhotos.length; i++) {
+        const data = newPhotos[i];
+        const path = `${hospital.id}/${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+        const blob = await fetch(data).then((res) => res.blob());
+        const { error } = await supabase.storage.from('review-photos').upload(path, blob, {
+          contentType: 'image/jpeg',
+          upsert: false,
+        });
+        if (error) {
+          throw error;
+        }
+        photoPaths.push(path);
+        setPhotoData((prev) => ({ ...prev, [path]: getReviewPhotoUrl(path) }));
       }
-      onAddReview(newRating, newText.trim(), photoIds);
+      await onAddReview(newRating, newText.trim(), photoPaths);
       setNewRating(0);
       setNewText('');
       setNewPhotos([]);
       setShowWrite(false);
+    } catch (error) {
+      Alert.alert('리뷰 등록 실패', '리뷰를 저장하지 못했어요. 잠시 후 다시 시도해주세요.');
     } finally {
       setSaving(false);
     }
@@ -81,22 +98,21 @@ function HospitalDetail({ hospital, reviews, onBack, onAddReview, stats }: {
   const canSubmit = newRating > 0 && newText.trim() && !saving;
 
   const loadReviewPhotos = useCallback(async () => {
-    const allIds = reviews.flatMap((r) => r.photoIds || []);
-    const toLoad = allIds.filter((pid) => !photoData[pid]);
+    const allPaths = reviews.flatMap((r) => r.photoPaths || []);
+    const toLoad = allPaths.filter((path) => !photoData[path]);
     if (toLoad.length === 0) return;
     const loaded: Record<string, string> = {};
-    for (const pid of toLoad) {
-      try {
-        const val = await AsyncStorage.getItem('review:photo:' + pid);
-        if (val) loaded[pid] = val;
-      } catch {}
-    }
+    toLoad.forEach((path) => {
+      loaded[path] = getReviewPhotoUrl(path);
+    });
     if (Object.keys(loaded).length > 0) {
       setPhotoData((prev) => ({ ...prev, ...loaded }));
     }
-  }, [reviews]);
+  }, [reviews, photoData]);
 
-  useState(() => { loadReviewPhotos(); });
+  useEffect(() => {
+    loadReviewPhotos();
+  }, [loadReviewPhotos]);
 
   return (
     <View style={styles.container}>
@@ -192,7 +208,7 @@ function HospitalDetail({ hospital, reviews, onBack, onAddReview, stats }: {
             </View>
           ) : (
             [...reviews].reverse().map((r, i) => {
-              const reviewPhotos = (r.photoIds || []).map((pid) => photoData[pid]).filter(Boolean);
+              const reviewPhotos = (r.photoPaths || []).map((path) => photoData[path]).filter(Boolean);
               return (
                 <View key={i} style={styles.reviewCard}>
                   <View style={styles.reviewCardHeader}>
@@ -230,27 +246,42 @@ function HospitalDetail({ hospital, reviews, onBack, onAddReview, stats }: {
 
 export default function Hospitals() {
   const router = useRouter();
+  const uid = useUserId();
   const { hospitals: HOSPITALS, reviews: supabaseReviews } = useData();
   const [query, setQuery] = useState('');
   const [sortBy, setSortBy] = useState('reviews');
-  const [reviews, setReviews] = usePersistedState<ReviewMap>('reviews:all', {} as ReviewMap);
+  const [reviews, setReviews] = useState<ReviewMap>({});
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [initialized, setInitialized] = useState(false);
+  const [pendingReviews, setPendingReviews] = useState<ReviewMap>({});
 
   useEffect(() => {
-    if (!initialized && Object.keys(supabaseReviews).length > 0) {
-      setReviews((prev: ReviewMap) => {
-        if (Object.keys(prev).length === 0) return supabaseReviews as ReviewMap;
-        return prev;
-      });
-      setInitialized(true);
-    }
-  }, [supabaseReviews, initialized]);
+    const merged: ReviewMap = { ...(supabaseReviews as ReviewMap) };
+    Object.entries(pendingReviews).forEach(([id, items]) => {
+      merged[Number(id)] = [...(merged[Number(id)] || []), ...items];
+    });
+    setReviews(merged);
+  }, [supabaseReviews, pendingReviews]);
 
-  const addReview = (id: number, rating: number, text: string, photoIds: string[]) => {
-    setReviews((prev: ReviewMap) => ({
+  const addReview = async (id: number, rating: number, text: string, photoPaths: string[]) => {
+    const review: ReviewWithPhotos = {
+      rating,
+      text,
+      date: new Date().toISOString(),
+      photoPaths,
+    };
+    const { error } = await supabase.from('reviews').insert({
+      hospital_id: id,
+      uid: uid || 'anonymous',
+      rating,
+      text,
+      photo_paths: photoPaths,
+    });
+    if (error) {
+      throw error;
+    }
+    setPendingReviews((prev) => ({
       ...prev,
-      [id]: [...(prev[id] || []), { rating, text, date: new Date().toISOString(), photoIds }],
+      [id]: [...(prev[id] || []), review],
     }));
   };
 

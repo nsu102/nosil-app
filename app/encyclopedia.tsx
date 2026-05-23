@@ -44,6 +44,7 @@ export default function Encyclopedia() {
     <AppShell currentPage="encyclopedia">
       <SubHeader title="시술 백과사전" onBack={() => router.push('/')} />
       <View style={s.searchWrap}>
+        <View style={s.searchRow}>
         <Ionicons name="search" size={16} color={C.textLight} style={s.searchIcon} />
         <TextInput
           value={query}
@@ -52,6 +53,7 @@ export default function Encyclopedia() {
           placeholderTextColor={C.textLight}
           style={s.searchInput}
         />
+        </View>
       </View>
       <ScrollView contentContainerStyle={s.listContent}>
         {isSearching ? (
@@ -117,8 +119,9 @@ export default function Encyclopedia() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
-  searchWrap: { position: 'relative', paddingTop: 16, paddingBottom: 12, paddingHorizontal: 20 },
-  searchIcon: { position: 'absolute', left: 14, top: 12, zIndex: 1 },
+  searchWrap: { paddingTop: 16, paddingBottom: 12, paddingHorizontal: 20 },
+  searchRow: { position: 'relative', justifyContent: 'center' },
+  searchIcon: { position: 'absolute', left: 14, zIndex: 1 },
   searchInput: {
     backgroundColor: C.card,
     borderWidth: 0.5,

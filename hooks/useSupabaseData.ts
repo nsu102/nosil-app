@@ -93,6 +93,7 @@ export function useSupabaseData() {
             rating: r.rating,
             text: r.text || '',
             date: r.created_at,
+            photoPaths: r.photo_paths || [],
           });
         });
         setReviews(map);

@@ -9,9 +9,9 @@ import { C } from '../data/colors';
 import { F } from '../data/fonts';
 import { useData } from '../contexts/DataContext';
 import { usePersistedState } from '../hooks/usePersistedState';
+import { useRouter } from 'expo-router';
 import AppShell from '../components/AppShell';
-
-const API_KEY = process.env.EXPO_PUBLIC_CLAUDE_API_KEY || '';
+import { sendMessage } from '../lib/claude';
 
 const QUICK_PROMPTS = [
   '내 시술 일정 요약해줘',
@@ -23,6 +23,7 @@ const QUICK_PROMPTS = [
 type Message = { role: 'user' | 'assistant'; content: string };
 
 export default function Chat() {
+  const router = useRouter();
   const { categories: CATEGORIES, treatments: TREATMENTS, hospitals: HOSPITALS } = useData();
   const [messages, setMessages] = usePersistedState<Message[]>('chat:messages', []);
   const [input, setInput] = useState('');
@@ -165,26 +166,10 @@ ${userSection}`;
     setLoading(true);
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1024,
-          system: buildSystemPrompt(),
-          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
-        }),
-      });
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error('API ' + response.status + ': ' + errText.slice(0, 200));
-      }
-      const data = await response.json();
-      const assistantText = (data.content || []).map((c: any) => c.text || '').filter(Boolean).join('') || '응답을 받지 못했어요. 다시 시도해주세요.';
+      const assistantText = await sendMessage(
+        newMessages.map((m) => ({ role: m.role, content: m.content })),
+        buildSystemPrompt()
+      );
       setMessages([...newMessages, { role: 'assistant', content: assistantText }]);
     } catch (err: any) {
       setMessages([...newMessages, { role: 'assistant', content: '죄송해요, 잠시 연결에 문제가 있어요. 잠시 후 다시 시도해주세요.\n\n(' + (err.message || '알 수 없는 오류') + ')' }]);
@@ -196,7 +181,9 @@ ${userSection}`;
   return (
     <AppShell currentPage="chat">
       <View style={styles.header}>
-        <View style={{ width: 24 }} />
+        <TouchableOpacity onPress={() => router.push('/')} style={{ padding: 4 }}>
+          <Ionicons name="chevron-back" size={20} color={C.text} />
+        </TouchableOpacity>
         <View style={{ alignItems: 'center', flex: 1 }}>
           <Text style={styles.headerTitle}>NO실장 AI</Text>
           <Text style={styles.headerSub}>피부 시술 컨시어지</Text>

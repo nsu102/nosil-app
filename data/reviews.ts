@@ -2,6 +2,7 @@ export type Review = {
   rating: number;
   text: string;
   date: string;
+  photoPaths?: string[];
 };
 
 export const SEED_REVIEWS: Record<number, Review[]> = {

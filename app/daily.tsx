@@ -8,11 +8,10 @@ import {
   Modal,
   Image,
   Alert,
-  Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -26,6 +25,14 @@ import { generateAftercareTasks } from '../utils/aftercare';
 import { fmtFull } from '../utils/date';
 import AppShell, { SubHeader } from '../components/AppShell';
 import { F } from '../data/fonts';
+import NativeDateField from '../components/NativeDateField';
+import { useUserId } from '../hooks/useUserId';
+import {
+  syncDailyCompleted, loadDailyCompleted, removeDailyCompleted,
+  syncDailyCustomTasks, loadDailyCustomTasks, removeDailyCustomTask,
+  syncDailyRoutine, loadDailyRoutine,
+  syncDailyPhoto, removeDailyPhoto, loadDailyPhotos,
+} from '../utils/sync';
 
 type RoutineItem = { time: string; task: string; icon?: string };
 type CustomTask = { time: string; task: string; icon: string; id: string };
@@ -281,6 +288,7 @@ function AddTaskModal({
 
 export default function DailyCare() {
   const router = useRouter();
+  const uid = useUserId();
   const { categories: CATEGORIES, treatments: TREATMENTS } = useData();
   const [step, setStep] = usePersistedState<string>('daily:step', 'select');
   const [selectedTreatments, setSelectedTreatments] = usePersistedState<string[]>('daily:treatments', []);
@@ -301,7 +309,41 @@ export default function DailyCare() {
   const [routine, setRoutine] = usePersistedState<RoutineItem[]>('daily:routine', DEFAULT_ROUTINE as RoutineItem[]);
   const [showRoutineEdit, setShowRoutineEdit] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  useEffect(() => {
+    if (!uid) return;
+    let mounted = true;
+    (async () => {
+      try {
+        const [sbCompleted, sbTasks, sbRoutine, sbPhotos] = await Promise.all([
+          loadDailyCompleted(uid),
+          loadDailyCustomTasks(uid),
+          loadDailyRoutine(uid),
+          loadDailyPhotos(uid),
+        ]);
+        if (!mounted) return;
+        if (Object.keys(sbCompleted).length > 0) setCompleted(sbCompleted);
+        if (Object.keys(sbTasks).length > 0) setCustomTasks(sbTasks);
+        if (sbRoutine) setRoutine(sbRoutine);
+        if (Object.keys(sbPhotos).length > 0) setPhotos(sbPhotos);
+
+        const keys = await AsyncStorage.getAllKeys();
+        const photoKeys = keys.filter((key) => key.startsWith('daily:photo:'));
+        if (photoKeys.length > 0 && mounted) {
+          const entries = await AsyncStorage.multiGet(photoKeys);
+          entries.forEach(([key, value]) => {
+            if (!value) return;
+            const dateKey = key.replace('daily:photo:', '');
+            if (!sbPhotos[dateKey]) {
+              const uri = JSON.parse(value);
+              setPhotos((prev) => ({ ...prev, [dateKey]: uri }));
+            }
+          });
+        }
+      } catch {}
+    })();
+    return () => { mounted = false; };
+  }, [uid]);
 
   const toggleTreatment = (name: string) => {
     setSelectedTreatments((prev) =>
@@ -320,6 +362,7 @@ export default function DailyCare() {
     setPhotos((prev) => ({ ...prev, [viewDate]: uri }));
     try {
       await AsyncStorage.setItem('daily:photo:' + viewDate, JSON.stringify(uri));
+      if (uid) syncDailyPhoto(uid, viewDate, uri);
     } catch {
       Alert.alert('알림', '사진 용량이 너무 커서 저장하지 못했어요.');
     }
@@ -333,6 +376,7 @@ export default function DailyCare() {
     });
     try {
       await AsyncStorage.removeItem('daily:photo:' + viewDate);
+      if (uid) removeDailyPhoto(uid, viewDate);
     } catch {}
   };
 
@@ -432,10 +476,12 @@ export default function DailyCare() {
 
   const addCustomTask = (time: string, task: string, icon?: string) => {
     const id = 'custom-' + Date.now();
-    setCustomTasks((prev) => ({
-      ...prev,
-      [viewDate]: [...(prev[viewDate] || []), { time, task, icon: icon || '✨', id }],
-    }));
+    const newTask = { time, task, icon: icon || '✨', id };
+    setCustomTasks((prev) => {
+      const next = { ...prev, [viewDate]: [...(prev[viewDate] || []), newTask] };
+      if (uid) syncDailyCustomTasks(uid, next);
+      return next;
+    });
   };
 
   const removeTask = (dateStr: string, id: string) => {
@@ -444,6 +490,7 @@ export default function DailyCare() {
         ...prev,
         [dateStr]: (prev[dateStr] || []).filter((t) => t.id !== id),
       }));
+      if (uid) removeDailyCustomTask(uid, id);
     } else if (id.startsWith('weather-')) {
       const condition = id.replace('weather-', '');
       dismissWeatherTask(condition);
@@ -452,7 +499,12 @@ export default function DailyCare() {
 
   const toggleComplete = (dateStr: string, id: string) => {
     const key = dateStr + '-' + id;
+    const wasCompleted = completed[key];
     setCompleted((prev) => ({ ...prev, [key]: !prev[key] }));
+    if (uid) {
+      if (wasCompleted) removeDailyCompleted(uid, key);
+      else syncDailyCompleted(uid, { [key]: true });
+    }
   };
 
   const navigateDate = (dir: number) => {
@@ -486,19 +538,13 @@ export default function DailyCare() {
             </Text>
             <View style={s.dateCard}>
               <Text style={s.dateLabel}>시술 받은 날짜</Text>
-              <TouchableOpacity onPress={() => setShowDatePicker(!showDatePicker)}>
-                <Text style={{ fontSize: 14, color: C.text }}>{treatmentDate}</Text>
-              </TouchableOpacity>
-            </View>
-            {showDatePicker && (
-              <MiniCalendar
-                selectedDate={treatmentDate}
-                onSelect={(d) => {
-                  setTreatmentDate(d);
-                  setShowDatePicker(false);
-                }}
+              <NativeDateField
+                value={treatmentDate}
+                onChange={setTreatmentDate}
+                max={new Date().toISOString().split('T')[0]}
+                textStyle={s.dateValue}
               />
-            )}
+            </View>
             <TouchableOpacity style={s.routineBtn} onPress={() => setShowRoutineEdit(true)}>
               <View>
                 <Text style={{ fontSize: 13, fontWeight: '500', color: C.text }}>
@@ -581,7 +627,7 @@ export default function DailyCare() {
             })}
           </View>
         </ScrollView>
-        <LinearGradient colors={['transparent', C.bg]} locations={[0, 0.2]} style={s.bottomBar}>
+        <LinearGradient colors={['rgba(250,247,242,0)', C.bg]} locations={[0, 0.3]} style={s.bottomBar}>
           <TouchableOpacity style={s.startBtn} onPress={() => setStep('routine')}>
             <Text style={s.startBtnText}>
               {selectedTreatments.length === 0
@@ -593,7 +639,7 @@ export default function DailyCare() {
         {showRoutineEdit && (
           <RoutineEditor
             routine={routine}
-            onChange={setRoutine}
+            onChange={(r: RoutineItem[]) => { setRoutine(r); if (uid) syncDailyRoutine(uid, r); }}
             onClose={() => setShowRoutineEdit(false)}
           />
         )}
@@ -708,7 +754,7 @@ export default function DailyCare() {
               )}
             </View>
           )}
-          <Text style={{ fontSize: 11, color: C.textMuted, marginBottom: 8 }}>오늘 피부 사진</Text>
+          <Text style={{ fontSize: 11, color: C.textMuted, marginBottom: 8 }}>{viewDate === new Date().toISOString().split('T')[0] ? '오늘 피부 사진' : viewDate + ' 피부 사진'}</Text>
           {todayPhoto ? (
             <View style={s.photoContainer}>
               <Image source={{ uri: todayPhoto }} style={s.photoImage} />
@@ -842,88 +888,6 @@ export default function DailyCare() {
   );
 }
 
-function MiniCalendar({
-  selectedDate,
-  onSelect,
-}: {
-  selectedDate: string;
-  onSelect: (d: string) => void;
-}) {
-  const [year, setYear] = useState(() => new Date(selectedDate).getFullYear());
-  const [month, setMonth] = useState(() => new Date(selectedDate).getMonth());
-
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDay = new Date(year, month, 1).getDay();
-  const days: (number | null)[] = [];
-  for (let i = 0; i < firstDay; i++) days.push(null);
-  for (let i = 1; i <= daysInMonth; i++) days.push(i);
-
-  const prevMonth = () => {
-    if (month === 0) {
-      setYear(year - 1);
-      setMonth(11);
-    } else {
-      setMonth(month - 1);
-    }
-  };
-
-  const nextMonth = () => {
-    if (month === 11) {
-      setYear(year + 1);
-      setMonth(0);
-    } else {
-      setMonth(month + 1);
-    }
-  };
-
-  const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
-
-  return (
-    <View style={s.calendarCard}>
-      <View style={s.calendarNav}>
-        <TouchableOpacity onPress={prevMonth}>
-          <Ionicons name="chevron-back" size={16} color={C.text} />
-        </TouchableOpacity>
-        <Text style={s.calendarTitle}>
-          {year}년 {month + 1}월
-        </Text>
-        <TouchableOpacity onPress={nextMonth}>
-          <Ionicons name="chevron-forward" size={16} color={C.text} />
-        </TouchableOpacity>
-      </View>
-      <View style={s.calendarDayNames}>
-        {dayNames.map((d) => (
-          <Text key={d} style={s.calendarDayName}>
-            {d}
-          </Text>
-        ))}
-      </View>
-      <View style={s.calendarGrid}>
-        {days.map((day, i) => {
-          if (day === null)
-            return <View key={'e' + i} style={s.calendarCell} />;
-          const dateStr =
-            year +
-            '-' +
-            String(month + 1).padStart(2, '0') +
-            '-' +
-            String(day).padStart(2, '0');
-          const isSelected = dateStr === selectedDate;
-          return (
-            <TouchableOpacity
-              key={i}
-              style={[s.calendarCell, isSelected && s.calendarCellActive]}
-              onPress={() => onSelect(dateStr)}
-            >
-              <Text style={[s.calendarDayText, isSelected && { color: C.bg }]}>{day}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-    </View>
-  );
-}
-
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   introText: { fontSize: 13, color: C.textMuted, lineHeight: 20.8, letterSpacing: 0.55, marginBottom: 16 },
@@ -937,6 +901,7 @@ const s = StyleSheet.create({
     marginBottom: 10,
   },
   dateLabel: { fontSize: 11, color: C.textMuted, marginBottom: 6 },
+  dateValue: { fontSize: 14, color: C.text },
   routineBtn: {
     backgroundColor: C.card,
     borderWidth: 0.5,
@@ -949,7 +914,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  searchBox: { position: 'relative', marginBottom: 10 },
+  searchBox: { position: 'relative', justifyContent: 'center', marginBottom: 10 },
   searchInput: {
     backgroundColor: C.card,
     borderWidth: 0.5,
@@ -1301,36 +1266,4 @@ const s = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
   },
-  calendarCard: {
-    backgroundColor: C.card,
-    borderWidth: 0.5,
-    borderColor: C.border,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 10,
-  },
-  calendarNav: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  calendarTitle: { fontSize: 13, fontWeight: '500', color: C.text, fontFamily: F.sansMedium },
-  calendarDayNames: { flexDirection: 'row' },
-  calendarDayName: {
-    flex: 1,
-    textAlign: 'center',
-    fontSize: 10,
-    color: C.textMuted,
-    marginBottom: 4,
-  },
-  calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' },
-  calendarCell: {
-    width: '14.28%',
-    aspectRatio: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  calendarCellActive: { backgroundColor: C.text, borderRadius: 999 },
-  calendarDayText: { fontSize: 12, color: C.text },
 });

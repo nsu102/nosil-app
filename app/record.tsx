@@ -1,7 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
-  Modal, Alert, StyleSheet, Dimensions, Platform,
+  Modal, Alert, StyleSheet, Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -13,6 +13,9 @@ import { generateSchedule, analyzeCombo } from '../utils/schedule';
 import { fmtDate, fmtFull, addDays, isSameDay } from '../utils/date';
 import AppShell, { SubHeader } from '../components/AppShell';
 import { F } from '../data/fonts';
+import NativeDateField from '../components/NativeDateField';
+import { useUserId } from '../hooks/useUserId';
+import { syncTreatmentRecord, loadTreatmentRecord } from '../utils/sync';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const CELL_SIZE = Math.floor((SCREEN_WIDTH - 40 - 24) / 7);
@@ -96,7 +99,7 @@ const PastTreatmentModal = ({ visible, onClose, onAdd }: {
                 style={ms.searchInput}
               />
             </View>
-            <View style={ms.treatmentList}>
+            <ScrollView style={ms.treatmentList} nestedScrollEnabled showsVerticalScrollIndicator={false}>
               {filtered.length === 0 ? (
                 <Text style={ms.emptyText}>검색 결과가 없어요</Text>
               ) : filtered.map(t => {
@@ -116,18 +119,17 @@ const PastTreatmentModal = ({ visible, onClose, onAdd }: {
                   </TouchableOpacity>
                 );
               })}
-            </View>
+            </ScrollView>
 
             {mode === 'single' ? (
               <>
                 <Text style={ms.label}>시술 받은 날짜</Text>
                 <View style={ms.dateInputWrap}>
-                  <TextInput
+                  <NativeDateField
                     value={singleDate}
-                    onChangeText={setSingleDate}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor={C.textLight}
-                    style={ms.dateInput}
+                    onChange={setSingleDate}
+                    max={today}
+                    textStyle={ms.dateInput}
                   />
                 </View>
               </>
@@ -138,12 +140,11 @@ const PastTreatmentModal = ({ visible, onClose, onAdd }: {
                   <View key={i} style={ms.multiDateRow}>
                     <Text style={ms.multiDateLabel}>{i + 1}회</Text>
                     <View style={ms.multiDateInputWrap}>
-                      <TextInput
+                      <NativeDateField
                         value={d}
-                        onChangeText={(val) => updateDate(i, val)}
-                        placeholder="YYYY-MM-DD"
-                        placeholderTextColor={C.textLight}
-                        style={ms.dateInput}
+                        onChange={(val) => updateDate(i, val)}
+                        max={today}
+                        textStyle={ms.dateInput}
                       />
                     </View>
                     {dates.length > 1 && (
@@ -183,6 +184,7 @@ const PastTreatmentModal = ({ visible, onClose, onAdd }: {
 export default function MyRecord() {
   const { categories: CATEGORIES, treatments: TREATMENTS, getTreatment } = useData();
   const router = useRouter();
+  const uid = useUserId();
   const [step, setStep] = usePersistedState<string>('manager:step', 'select');
   const [counts, setCounts] = usePersistedState<Record<string, number>>('manager:counts', {});
   const [startDate, setStartDate] = usePersistedState<string>('manager:startDate', new Date().toISOString().split('T')[0]);
@@ -199,6 +201,31 @@ export default function MyRecord() {
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [showWarning, setShowWarning] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    if (!uid) return;
+    let mounted = true;
+    (async () => {
+      const data = await loadTreatmentRecord(uid);
+      if (!mounted || !data) return;
+      setStep(data.step);
+      setCounts(data.counts);
+      if (data.startDate) setStartDate(data.startDate);
+      if (data.schedule.length > 0) setSchedule(data.schedule);
+      if (data.pastTreatments.length > 0) setPastTreatments(data.pastTreatments);
+    })();
+    return () => { mounted = false; };
+  }, [uid]);
+
+  const saveToSupabase = useCallback(() => {
+    if (!uid) return;
+    syncTreatmentRecord(uid, { step, counts, startDate, schedule, pastTreatments });
+  }, [uid, step, counts, startDate, schedule, pastTreatments]);
+
+  useEffect(() => {
+    if (!uid) return;
+    saveToSupabase();
+  }, [saveToSupabase]);
 
   const totalSessions = Object.values(counts).reduce((a, b) => a + b, 0);
   const selectedNames = Object.keys(counts);
@@ -242,12 +269,11 @@ export default function MyRecord() {
             </TouchableOpacity>
             <View style={s.dateCard}>
               <Text style={s.dateLabel}>시작일</Text>
-              <TextInput
+              <NativeDateField
                 value={startDate}
-                onChangeText={setStartDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={C.textLight}
-                style={s.dateInput}
+                onChange={setStartDate}
+                max={new Date().toISOString().split('T')[0]}
+                textStyle={s.dateInput}
               />
             </View>
           </View>
@@ -339,7 +365,7 @@ export default function MyRecord() {
           </View>
         </ScrollView>
 
-        <LinearGradient colors={['transparent', C.bg]} locations={[0, 0.2]} style={s.bottomBar}>
+        <LinearGradient colors={['rgba(250,247,242,0)', C.bg]} locations={[0, 0.3]} style={s.bottomBar}>
           <TouchableOpacity
             onPress={handleGenerateClick}
             disabled={totalSessions === 0}
@@ -575,7 +601,7 @@ const s = StyleSheet.create({
   counterRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   counterBtn: { width: 28, height: 28, borderRadius: 14, borderWidth: 0.5, borderColor: C.borderStrong, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
   counterText: { fontSize: 14, fontWeight: '500', color: C.text, minWidth: 18, textAlign: 'center', fontFamily: F.sansMedium },
-  bottomBar: { paddingHorizontal: 20, paddingVertical: 14, backgroundColor: C.bg },
+  bottomBar: { paddingHorizontal: 20, paddingVertical: 14 },
   generateBtn: { width: '100%', padding: 14, backgroundColor: C.text, borderRadius: 14, alignItems: 'center' },
   generateText: { fontSize: 15, fontWeight: '500', color: C.bg, fontFamily: F.sansMedium },
   warningOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center', padding: 20 },

@@ -7,6 +7,8 @@ import {
   Image,
   Alert,
   StyleSheet,
+  Animated,
+  Easing,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +22,8 @@ import TreatmentDetailScreen from '../components/TreatmentDetail';
 import { TREATMENT_COLORS } from '../data/colors';
 import { F } from '../data/fonts';
 import Spinner from '../components/Spinner';
+import { useUserId } from '../hooks/useUserId'; // TODO: 추후 로그인 로직으로 변경
+import { supabase } from '../lib/supabase';
 
 const ANALYSIS_LOADING_MESSAGES = [
   'AI가 0.1mm 단위로 모공과 요철을 정밀 스캔하고 있어요.',
@@ -47,6 +51,26 @@ type AnalysisResult = {
   needs_consult: string[];
   summary: string;
 };
+
+function normalizeAnalysisResult(parsed: AnalysisResult): AnalysisResult {
+  const levels = parsed.concern_levels || {};
+  const merged = Array.from(new Set([...(parsed.concerns || []), ...Object.keys(levels)]))
+    .map((name) => ({
+      name,
+      level: typeof levels[name] === 'number' ? levels[name] : 0,
+    }))
+    .filter((item) => item.level > 0 || item.name)
+    .sort((a, b) => b.level - a.level || a.name.localeCompare(b.name));
+
+  return {
+    ...parsed,
+    concerns: merged.map((item) => item.name),
+    concern_levels: merged.reduce<Record<string, number>>((acc, item) => {
+      acc[item.name] = item.level;
+      return acc;
+    }, {}),
+  };
+}
 
 function TreatmentChip({
   name,
@@ -90,12 +114,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export default function Recommend() {
   const { treatments: TREATMENTS, concerns: CONCERN_DATA, getTreatment } = useData();
   const router = useRouter();
+  const uid = useUserId();
   const [photo, setPhoto] = useState<{ uri: string; base64: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [msgIdx, setMsgIdx] = useState(0);
   const [detailTreatment, setDetailTreatment] = useState<Treatment | null>(null);
+  const loadingSlide = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (!loading) return;
@@ -105,6 +131,17 @@ export default function Recommend() {
     }, 4000);
     return () => clearInterval(interval);
   }, [loading]);
+
+  useEffect(() => {
+    if (!loading) return;
+    loadingSlide.setValue(14);
+    Animated.timing(loadingSlide, {
+      toValue: 0,
+      duration: 420,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [loading, msgIdx, loadingSlide]);
 
   const pickFromGallery = async () => {
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -186,6 +223,7 @@ export default function Recommend() {
     return lines.join('\n');
   };
 
+  // AI 모델 선택
   const analyze = async () => {
     if (!photo) return;
     setLoading(true);
@@ -200,7 +238,7 @@ export default function Recommend() {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           max_tokens: 1200,
           messages: [{
             role: 'user',
@@ -217,7 +255,24 @@ export default function Recommend() {
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('parse');
       const parsed = JSON.parse(match[0]);
-      setResult(parsed);
+      const normalized = normalizeAnalysisResult(parsed);
+      setResult(normalized);
+      if (uid && photo) {
+        (async () => {
+          try {
+            const fileName = `${uid}/${Date.now()}.jpg`;
+            const response2 = await fetch(photo.uri);
+            const blob = await response2.blob();
+            await supabase.storage.from('review-photos').upload(fileName, blob, { contentType: 'image/jpeg' });
+            const { data: urlData } = supabase.storage.from('review-photos').getPublicUrl(fileName);
+            await supabase.from('analysis_records').insert({
+              uid,
+              photo_url: urlData.publicUrl,
+              result: normalized,
+            });
+          } catch {}
+        })();
+      }
     } catch {
       setError('분석 중 문제가 생겼어요. 다시 시도해주세요.');
     } finally {
@@ -271,9 +326,23 @@ export default function Recommend() {
                 {loading && (
                   <View style={styles.loadingBox}>
                     <Ionicons name="sparkles" size={16} color={C.accent} style={{ marginTop: 2 }} />
-                    <Text key={msgIdx} style={styles.loadingText}>
-                      {ANALYSIS_LOADING_MESSAGES[msgIdx]}
-                    </Text>
+                    <View style={styles.loadingTickerViewport}>
+                      <Animated.Text
+                        key={msgIdx}
+                        style={[
+                          styles.loadingText,
+                          {
+                            transform: [{ translateY: loadingSlide }],
+                            opacity: loadingSlide.interpolate({
+                              inputRange: [0, 14],
+                              outputRange: [1, 0.25],
+                            }),
+                          },
+                        ]}
+                      >
+                        {ANALYSIS_LOADING_MESSAGES[msgIdx]}
+                      </Animated.Text>
+                    </View>
                   </View>
                 )}
                 <TouchableOpacity
@@ -467,6 +536,7 @@ const styles = StyleSheet.create({
     gap: 12,
     alignItems: 'flex-start',
   },
+  loadingTickerViewport: { flex: 1, minHeight: 42, overflow: 'hidden', justifyContent: 'center' },
   loadingText: { flex: 1, fontSize: 13, color: C.text, lineHeight: 21 },
   analyzeButton: {
     width: '100%',
